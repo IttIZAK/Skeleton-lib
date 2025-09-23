@@ -6,7 +6,7 @@ import time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import mediapipe as mp
 import math
-from typing import List, Dict, Optional
+from typing import Dict, Optional
 
 app = FastAPI()
 mp_pose = mp.solutions.pose
@@ -15,10 +15,9 @@ mp_pose = mp.solutions.pose
 pose_states: Dict[str, Dict] = {}
 hold_timers: Dict[str, Dict] = {}
 reps_counts: Dict[str, Dict[str, int]] = {}
-last_detected: Dict[str, tuple] = {}
 last_sent_time: Dict[str, float] = {}
 frame_skip_config: Dict[str, int] = {}
-selected_pose_per_client: Dict[str, Optional[str]] = {}   # ✅ เก็บท่าที่เลือก
+selected_pose_per_client: Dict[str, Optional[str]] = {}
 
 # ---------------------- Config ----------------------
 DETECTION_COOLDOWN = 0.5
@@ -173,21 +172,22 @@ def is_lying_leg_raises(lm):
 
 # ---------------------- Mapping ----------------------
 DETECTORS = {
-    "squat": is_squat,
-    "pushup": is_pushup,
-    "plank": is_plank,
-    "situp": is_situp,
-    "forward_lunge": is_forward_lunge,
-    "dead_bug": is_dead_bug,
-    "side_plank": is_side_plank,
-    "russian_twist": is_russian_twist,
-    "lying_leg_raises": is_lying_leg_raises
+    "Bodyweight Squat": is_squat,
+    "Push-ups": is_pushup,
+    "Plank": is_plank,
+    "Sit-ups": is_situp,
+    "Lunge (Forward Lunge)": is_forward_lunge,
+    "Dead Bug": is_dead_bug,
+    "Side Plank": is_side_plank,
+    "Russian Twist": is_russian_twist,
+    "Lying Leg Raises": is_lying_leg_raises
 }
 
-HOLD_POSES = {"plank", "side_plank"}
-REPS_POSES = {"squat", "pushup", "situp", "forward_lunge",
-              "dead_bug", "russian_twist", "lying_leg_raises"}
+HOLD_POSES = {"Plank", "Side Plank"}
+REPS_POSES = {"Bodyweight Squat", "Push-ups", "Sit-ups", "Lunge (Forward Lunge)",
+              "Dead Bug", "Russian Twist", "Lying Leg Raises"}
 
+# ---------------------- Counter update ----------------------
 def update_counters(client_id, pose_name, confidence, ts):
     reps_counts.setdefault(client_id, {})
     pose_states.setdefault(client_id, {})
@@ -216,8 +216,6 @@ def update_counters(client_id, pose_name, confidence, ts):
             reps_counts[client_id][pose_name] += 1
             state["in_pose"] = False
 
-    last_detected[client_id] = (pose_name, confidence, ts)
-
 # ---------------- WebSocket ----------------
 @app.websocket("/ws/pose")
 async def websocket_endpoint(websocket: WebSocket):
@@ -225,14 +223,9 @@ async def websocket_endpoint(websocket: WebSocket):
     client_id = f"{websocket.client.host}_{int(time.time()*1000)}"
     print(f"[CONNECTED] {client_id}")
 
-    frame_idx, frame_skip = 0, FRAME_SKIP
-    frame_skip_config[client_id] = frame_skip
-    pose_states.setdefault(client_id, {})
-    hold_timers.setdefault(client_id, {})
-    reps_counts.setdefault(client_id, {})
-    last_detected.setdefault(client_id, (None, 0.0, 0.0))
-    last_sent_time.setdefault(client_id, 0.0)
-    selected_pose_per_client[client_id] = None  # ✅ เริ่มต้นยังไม่ได้เลือกท่า
+    frame_idx = 0
+    frame_skip_config[client_id] = FRAME_SKIP
+    selected_pose_per_client[client_id] = None
 
     with mp_pose.Pose(static_image_mode=False, model_complexity=0,
                       enable_segmentation=False, min_detection_confidence=0.5,
@@ -242,16 +235,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 data = await websocket.receive_text()
                 frame_idx += 1
 
-                # ---------- handle config/commands ----------
-                if data.startswith("{"):  
+                # ---------- handle commands ----------
+                if data.startswith("{"):
                     try:
                         cmd = json.loads(data)
                         if "frame_skip" in cmd:
                             frame_skip_config[client_id] = int(cmd["frame_skip"])
-                        if "save_detected" in cmd:
-                            global FRAME_SAVE_DETECTED
-                            FRAME_SAVE_DETECTED = bool(cmd["save_detected"])
-                        if "select_pose" in cmd:   # ✅ รับท่าจาก Flutter
+                        if "select_pose" in cmd:
                             pose_name = cmd["select_pose"]
                             if pose_name in DETECTORS:
                                 selected_pose_per_client[client_id] = pose_name
@@ -269,7 +259,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 # ---------- frame skip ----------
-                if (frame_idx % (frame_skip + 1)) != 0:
+                if (frame_idx % (frame_skip_config.get(client_id, FRAME_SKIP) + 1)) != 0:
                     await websocket.send_text(json.dumps({"status": "ok"}))
                     continue
 
@@ -288,9 +278,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 ts = time.time()
                 results = pose_detector.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
+                # prepare response template
                 response = {
                     "pose": "N/A", "confidence": 0.0,
-                    "reps": {}, "holds": {}, "timestamp": ts,
+                    "reps": reps_counts.get(client_id, {}),
+                    "holds": {},
+                    "timestamp": ts,
                     "selected_pose": selected_pose_per_client.get(client_id)
                 }
 
@@ -299,21 +292,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     selected_pose = selected_pose_per_client.get(client_id)
 
                     if selected_pose and selected_pose in DETECTORS:
-                        # ✅ ตรวจจับเฉพาะท่าที่เลือก
                         confidence = DETECTORS[selected_pose](landmarks)
                         update_counters(client_id, selected_pose, confidence, ts)
 
-                        user_reps = reps_counts.get(client_id, {})
-                        user_holds = {
-                            p: {"current_hold": round((ts - h["started_at"]) if h["started_at"] else 0.0, 2),
-                                "best_hold": round(h["best"], 2)}
-                            for p, h in hold_timers.get(client_id, {}).items()
-                        }
+                        # ---------- update hold info ----------
+                        user_holds = {}
+                        for p, h in hold_timers.get(client_id, {}).items():
+                            current_hold = round((ts - h["started_at"]) if h["started_at"] else 0.0, 2)
+                            user_holds[p] = {
+                                "current_hold": current_hold,
+                                "best_hold": round(h["best"], 2)
+                            }
 
                         response.update({
                             "pose": selected_pose,
                             "confidence": round(confidence, 3),
-                            "reps": user_reps,
+                            "reps": reps_counts.get(client_id, {}),
                             "holds": user_holds
                         })
                     else:
@@ -321,7 +315,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     response["error"] = "no_pose"
 
-                if ts - last_sent_time[client_id] >= DETECTION_COOLDOWN:
+                last_time = last_sent_time.get(client_id, 0)
+                if ts - last_time >= DETECTION_COOLDOWN:
                     await websocket.send_text(json.dumps(response))
                     last_sent_time[client_id] = ts
                 else:
@@ -330,8 +325,7 @@ async def websocket_endpoint(websocket: WebSocket):
         except WebSocketDisconnect:
             print(f"[DISCONNECTED] {client_id}")
             for d in [pose_states, hold_timers, reps_counts,
-                      last_detected, last_sent_time, frame_skip_config,
-                      selected_pose_per_client]:
+                      last_sent_time, frame_skip_config, selected_pose_per_client]:
                 d.pop(client_id, None)
 
 # run: python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
