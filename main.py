@@ -38,7 +38,7 @@ def angle_between(a, b, c) -> float:
 
 def landmark_xy(lm) -> tuple:
     return (lm.x, lm.y)
-# ---------------------- Pose functions ----------------------
+# ---------------------- Pose detech  ----------------------
 def is_squat(lm) -> float:
     try:
         R_hip = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_HIP.value])
@@ -187,6 +187,117 @@ HOLD_POSES = {"Plank", "Side Plank"}
 REPS_POSES = {"Bodyweight Squat", "Push-ups", "Sit-ups", "Lunge (Forward Lunge)",
               "Dead Bug", "Russian Twist", "Lying Leg Raises"}
 
+# ---------------------- Feedback ----------------------
+def feedback_squat(lm):
+    R_hip = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_HIP.value])
+    R_knee = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_KNEE.value])
+    R_ankle = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_ANKLE.value])
+    angle = angle_between(R_hip, R_knee, R_ankle)
+
+    if angle > 150:
+        return "งอเข่าให้มากขึ้น"
+    elif angle < 70:
+        return "ยืดขึ้นมาอีกเล็กน้อย"
+    return "ท่าถูกต้อง"
+
+def feedback_pushup(lm):
+    L_sh = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value])
+    L_el = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_ELBOW.value])
+    L_wr = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_WRIST.value])
+    R_sh = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value])
+    R_hip = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_HIP.value])
+    L_hip = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_HIP.value])
+
+    elbow_angle = angle_between(L_sh, L_el, L_wr)
+    torso_diff = abs(((L_sh[1]+R_sh[1])/2) - ((L_hip[1]+R_hip[1])/2))
+
+    if elbow_angle > 160:
+        return "งอศอกลงอีกเพื่อทำ push-up ให้ลึก"
+    elif elbow_angle < 50:
+        return "ดันขึ้นมาอีกหน่อย"
+    elif torso_diff > 0.1:
+        return "เก็บสะโพกให้อยู่ในแนวเดียวกับไหล่"
+    return "ท่าถูกต้อง"
+
+def feedback_plank(lm):
+    L_sh = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value])
+    L_hip = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_HIP.value])
+    L_ankle = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_ANKLE.value])
+
+    torso_angle = angle_between(L_sh, L_hip, L_ankle)
+    if torso_angle < 150:
+        return "เก็บสะโพกให้อยู่ระดับเดียวกับลำตัว"
+    return "ท่าถูกต้อง"
+
+def feedback_situp(lm):
+    L_sh = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value])
+    L_hip = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_HIP.value])
+    dist = abs(L_sh[1] - L_hip[1])
+    if dist > 0.2:
+        return "งอตัวขึ้นมาใกล้เข่ามากขึ้น"
+    elif dist < 0.05:
+        return "เอนตัวลงไปอีกนิด"
+    return "ท่าถูกต้อง"
+
+def feedback_forward_lunge(lm):
+    R_knee = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_KNEE.value])
+    R_hip = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_HIP.value])
+    angle = angle_between(R_hip, R_knee, landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_ANKLE.value]))
+    if angle > 150:
+        return "งอเข่าหน้าให้มากขึ้น"
+    return "ท่าถูกต้อง"
+
+def feedback_dead_bug(lm):
+    L_wr = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_WRIST.value])
+    R_wr = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_WRIST.value])
+    L_an = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_ANKLE.value])
+    R_an = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_ANKLE.value])
+    avg_arm_y = (L_wr[1] + R_wr[1]) / 2
+    avg_leg_y = (L_an[1] + R_an[1]) / 2
+    if avg_arm_y > 0.8 or avg_leg_y > 0.8:
+        return "ยกแขนหรือขาให้สูงขึ้น"
+    return "ท่าถูกต้อง"
+
+def feedback_side_plank(lm):
+    L_sh = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value])
+    L_hip = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_HIP.value])
+    angle = angle_between(L_sh, L_hip, landmark_xy(lm[mp_pose.PoseLandmark.LEFT_ANKLE.value]))
+    if angle < 150:
+        return "ยกสะโพกขึ้นอีก"
+    return "ท่าถูกต้อง"
+
+def feedback_russian_twist(lm):
+    nose = landmark_xy(lm[mp_pose.PoseLandmark.NOSE.value])
+    L_hip = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_HIP.value])
+    R_hip = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_HIP.value])
+    hip_center_x = (L_hip[0] + R_hip[0]) / 2
+    if abs(nose[0] - hip_center_x) < 0.02:
+        return "บิดลำตัวไปทางซ้ายหรือขวามากขึ้น"
+    return "ท่าถูกต้อง"
+
+def feedback_lying_leg_raises(lm):
+    L_an = landmark_xy(lm[mp_pose.PoseLandmark.LEFT_ANKLE.value])
+    R_an = landmark_xy(lm[mp_pose.PoseLandmark.RIGHT_ANKLE.value])
+    avg_an_y = (L_an[1] + R_an[1]) / 2
+    if avg_an_y > 0.9:
+        return "ยกขาขึ้นสูงกว่านี้"
+    return "ท่าถูกต้อง"
+
+# ---------------------- Mapping Feedback ----------------------
+FEEDBACKS = {
+    "Bodyweight Squat": feedback_squat,
+    "Push-ups": feedback_pushup,
+    "Plank": feedback_plank,
+    "Sit-ups": feedback_situp,
+    "Lunge (Forward Lunge)": feedback_forward_lunge,
+    "Dead Bug": feedback_dead_bug,
+    "Side Plank": feedback_side_plank,
+    "Russian Twist": feedback_russian_twist,
+    "Lying Leg Raises": feedback_lying_leg_raises
+}
+
+
+
 # ---------------------- Counter update ----------------------
 def update_counters(client_id, pose_name, confidence, ts):
     reps_counts.setdefault(client_id, {})
@@ -304,12 +415,17 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "best_hold": round(h["best"], 2)
                             }
 
+                        # ---------- new: add advice ----------
+                        advice = FEEDBACKS[selected_pose](landmarks) if selected_pose in FEEDBACKS else ""
+
                         response.update({
                             "pose": selected_pose,
                             "confidence": round(confidence, 3),
                             "reps": reps_counts.get(client_id, {}),
-                            "holds": user_holds
+                            "holds": user_holds,
+                            "advice": advice
                         })
+
                     else:
                         response["error"] = "no_pose_selected"
                 else:
