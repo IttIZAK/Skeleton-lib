@@ -9,30 +9,33 @@ class Client:
         self.hold_times = {}
         self.last_ts = time.time()
         
-        # State tracking for each pose - ใช้ระบบ peak detection แบบง่าย
-        self.pose_states = {}  # {pose_name: "high" | "low"}
+        # State tracking for each pose - ใช้ระบบ peak detection
+        self.pose_states = {}  # {pose_name: "high" | "low" | "transition"}
         self.last_confidence = {}  # {pose_name: float}
         self.last_rep_time = {}  # {pose_name: timestamp}
         self.peak_detected = {}  # {pose_name: bool} - สำหรับตรวจจับจุดสูงสุด
+        self.confidence_history = {}  # {pose_name: [conf1, conf2, ...]} - เก็บประวัติ 5 frame
 
 class ClientManager:
-    # Cooldown periods (seconds) - ลดลงให้นับได้เร็วขึ้น
+    # Cooldown periods (seconds) - เพิ่มเวลาให้เหมาะสม
     COOLDOWN = {
-        "Bodyweight Squat": 0.5,
-        "Push-ups": 0.4,
-        "Sit-ups": 0.5,
-        "Lunge (Split Squat)": 0.6,
-        "Dead Bug": 0.7,
-        "Russian Twist": 0.3,
-        "Lying Leg Raises": 0.5,
+        "Bodyweight Squat": 0.8,     # เพิ่มจาก 0.6
+        "Push-ups": 0.7,              # เพิ่มจาก 0.5
+        "Sit-ups": 0.8,               # เพิ่มจาก 0.6
+        "Lunge (Split Squat)": 0.9,  # เพิ่มจาก 0.7
+        "Dead Bug": 1.0,              # เพิ่มจาก 0.8
+        "Russian Twist": 0.5,         # เพิ่มจาก 0.4
+        "Lying Leg Raises": 0.8,      # เพิ่มจาก 0.6
     }
     
-    # Threshold สำหรับการตรวจจับ peak (จุดสูงสุด) และ valley (จุดต่ำสุด)
-    HIGH_THRESHOLD = 0.70   # ต้องสูงกว่านี้ถึงจะถือว่าทำท่าได้ดี (peak)
-    LOW_THRESHOLD = 0.35    # ต้องต่ำกว่านี้ถึงจะถือว่ากลับสู่ตำแหน่งเริ่มต้น (valley)
+    # Threshold สำหรับการตรวจจับ
+    HIGH_THRESHOLD = 0.50   # ลดจาก 0.55 ให้ตรวจจับง่ายขึ้น
+    LOW_THRESHOLD = 0.30    # ✅ เพิ่มขึ้นจาก 0.25 เป็น 0.30
+    TRANSITION_THRESHOLD = 0.38  # ลดจาก 0.42
     
     # สำหรับท่าค้าง
-    HOLD_THRESHOLD = 0.80
+    HOLD_THRESHOLD = 0.55   # ลดจาก 0.60
+    HOLD_MIN_DURATION = 0.3
 
     def __init__(self):
         self.clients = {}
@@ -60,10 +63,16 @@ class ClientManager:
             client.selected_pose = pose
             # Initialize state for new pose
             if pose not in client.pose_states:
-                client.pose_states[pose] = "low"  # เริ่มที่ low
+                client.pose_states[pose] = "low"
                 client.last_confidence[pose] = 0.0
                 client.last_rep_time[pose] = 0.0
                 client.peak_detected[pose] = False
+                client.confidence_history[pose] = []
+                # ✅ Initialize counters
+                if pose not in client.reps_counts:
+                    client.reps_counts[pose] = 0
+                if pose not in client.hold_times:
+                    client.hold_times[pose] = {"current": 0.0, "best": 0.0}
 
     def get_pose(self, cid):
         return self.clients.get(cid).selected_pose if cid in self.clients else None
@@ -76,13 +85,48 @@ class ClientManager:
 
     def _check_cooldown(self, client, pose, ts):
         """ตรวจสอบว่าพ้น cooldown แล้วหรือยัง"""
-        cooldown = self.COOLDOWN.get(pose, 0.4)
+        cooldown = self.COOLDOWN.get(pose, 0.7)  # default เพิ่มเป็น 0.7
         last_time = client.last_rep_time.get(pose, 0.0)
         return (ts - last_time) >= cooldown
 
-    def update_counters(self, cid, pose, confidence, ts):
+    def _smooth_confidence(self, client, pose, confidence):
+        """ทำให้ confidence นุ่มนวลขึ้นด้วยการเฉลี่ย"""
+        if pose not in client.confidence_history:
+            client.confidence_history[pose] = []
+        
+        history = client.confidence_history[pose]
+        history.append(confidence)
+        
+        # เก็บแค่ 2 frame ล่าสุด
+        if len(history) > 2:
+            history.pop(0)
+        
+        return sum(history) / len(history)
+
+    def update_counters(self, cid, pose, confidence, ts, full_body_visible=True):
+        """
+        อัพเดท counters และ hold times
+        
+        ✅ แก้ไข: ทำให้ชัดเจนว่าเมื่อไรนับ rep
+        """
         client = self.clients.get(cid)
         if not client:
+            return
+        
+        # ⚠️ CRITICAL: ถ้าเห็นไม่เต็มตัว -> ไม่นับเลย!
+        if not full_body_visible:
+            # Reset hold time สำหรับท่าค้าง
+            if pose in ["Plank", "Side Plank"]:
+                hold = client.hold_times.get(pose, {"current": 0.0, "best": 0.0})
+                if hold["current"] > self.HOLD_MIN_DURATION:
+                    hold["best"] = max(hold.get("best", 0.0), hold["current"])
+                hold["current"] = 0.0
+                client.hold_times[pose] = hold
+            
+            # Reset state
+            client.pose_states[pose] = "low"
+            client.peak_detected[pose] = False
+            client.last_confidence[pose] = 0.0
             return
         
         dt = ts - client.last_ts if client.last_ts else 0.0
@@ -94,79 +138,92 @@ class ClientManager:
             client.last_confidence[pose] = 0.0
             client.last_rep_time[pose] = 0.0
             client.peak_detected[pose] = False
+            client.confidence_history[pose] = []
+            if pose not in client.reps_counts:
+                client.reps_counts[pose] = 0
+
+        # Smooth confidence เพื่อลด noise
+        smoothed_conf = self._smooth_confidence(client, pose, confidence)
 
         # Hold-based poses (Plank, Side Plank)
         if pose in ["Plank", "Side Plank"]:
             hold = client.hold_times.get(pose, {"current": 0.0, "best": 0.0})
             
-            if confidence > self.HOLD_THRESHOLD:
+            if full_body_visible and smoothed_conf > self.HOLD_THRESHOLD:
                 hold["current"] = hold.get("current", 0.0) + dt
+                client.pose_states[pose] = "holding"
             else:
-                # Reset if form breaks
-                if hold["current"] > 0.3:  # บันทึกถ้าค้างได้อย่างน้อย 0.3 วินาที
+                if hold["current"] > self.HOLD_MIN_DURATION:
                     hold["best"] = max(hold.get("best", 0.0), hold["current"])
                 hold["current"] = 0.0
+                client.pose_states[pose] = "not_holding"
             
             client.hold_times[pose] = hold
-            client.pose_states[pose] = "holding" if confidence > self.HOLD_THRESHOLD else "low"
-            client.last_confidence[pose] = confidence
+            client.last_confidence[pose] = smoothed_conf
             return
 
-        # Rep-based poses - ใช้ Peak Detection แบบง่าย
-        # Logic: low → high (ตรวจจับ peak) → low → count!
-        
+        # ✅ Rep-based poses - ใช้ทั้ง raw และ smoothed confidence
         current_state = client.pose_states[pose]
-        last_conf = client.last_confidence[pose]
-        peak_detected = client.peak_detected[pose]
+        
+        # ใช้ raw confidence สำหรับการตัดสินใจที่รวดเร็ว
+        use_raw_for_low = confidence <= self.LOW_THRESHOLD
+        use_smoothed_for_high = smoothed_conf >= self.HIGH_THRESHOLD
 
-        # ตรวจจับว่าอยู่ในสถานะไหน
-        is_high = confidence >= self.HIGH_THRESHOLD
-        is_low = confidence <= self.LOW_THRESHOLD
-
+        # State Machine Logic
         if current_state == "low":
-            # รอให้ไปถึงจุดสูง (peak)
-            if is_high:
+            if use_smoothed_for_high:
+                # เข้าสู่ท่าที่ดี -> เปลี่ยนเป็น high
                 client.pose_states[pose] = "high"
-                client.peak_detected[pose] = True  # mark ว่าเจอ peak แล้ว
+                client.peak_detected[pose] = True
+                print(f"[{pose}] LOW -> HIGH (raw: {confidence:.2f}, smoothed: {smoothed_conf:.2f})")
                 
         elif current_state == "high":
-            # อยู่ที่จุดสูงแล้ว รอให้กลับมาต่ำ
-            if is_low and peak_detected:
-                # กลับมาต่ำแล้ว = นับ 1 rep!
+            # ✅ ใช้ raw confidence เพื่อให้ตอบสนองเร็วขึ้น
+            if use_raw_for_low and client.peak_detected[pose]:
+                # กลับสู่ตำแหน่งเริ่มต้น + เคยผ่าน peak -> นับ rep!
                 if self._check_cooldown(client, pose, ts):
                     client.reps_counts[pose] = client.reps_counts.get(pose, 0) + 1
                     client.last_rep_time[pose] = ts
-                    # print(f"[REP COUNT] {pose}: {client.reps_counts[pose]}")  # debug
+                    print(f"[{pose}] ✅ REP COUNTED! Total: {client.reps_counts[pose]} (raw: {confidence:.2f})")
+                else:
+                    print(f"[{pose}] ⏳ Cooldown not passed (last rep: {ts - client.last_rep_time[pose]:.2f}s ago)")
                 
-                # Reset state
                 client.pose_states[pose] = "low"
                 client.peak_detected[pose] = False
-            elif not is_high and not is_low:
-                # อยู่ระหว่างกลาง ยังคงเป็น high
-                pass
+                print(f"[{pose}] HIGH -> LOW (returning to start position)")
 
-        # Store last confidence for debugging
-        client.last_confidence[pose] = confidence
+        # Store last confidence
+        client.last_confidence[pose] = smoothed_conf
 
     def get_state_debug(self, cid, pose):
         """สำหรับ debug - ดูสถานะปัจจุบัน"""
         client = self.clients.get(cid)
         if not client or pose not in client.pose_states:
             return "N/A"
+        
         state = client.pose_states[pose]
         peak = "✓" if client.peak_detected.get(pose, False) else "✗"
-        return f"{state} (peak:{peak})"
+        conf = client.last_confidence.get(pose, 0.0)
+        reps = client.reps_counts.get(pose, 0)
+        
+        return f"{state} (peak:{peak}, conf:{conf:.2f}, reps:{reps})"
 
     def make_response(self, cid, pose, ts):
         client = self.clients.get(cid)
         if not client:
             return {"status": "error", "message": "client not found"}
 
+        # ✅ สร้าง holds ในรูปแบบที่ Flutter คาดหวัง
         hold_info = {}
         if pose in ["Plank", "Side Plank"]:
-            hold_info = {pose: client.hold_times.get(pose, {"current": 0.0, "best": 0.0})}
+            hold_data = client.hold_times.get(pose, {"current": 0.0, "best": 0.0})
+            hold_info = {
+                pose: {
+                    "current_hold": hold_data.get("current", 0.0),  # ✅ เปลี่ยนชื่อให้ตรง
+                    "best_hold": hold_data.get("best", 0.0)         # ✅ เปลี่ยนชื่อให้ตรง
+                }
+            }
 
-        # Add debug info
         state = client.pose_states.get(pose, "waiting") if pose else "N/A"
         last_conf = client.last_confidence.get(pose, 0.0) if pose else 0.0
 
@@ -175,8 +232,8 @@ class ClientManager:
             "pose": pose or "N/A",
             "confidence": 0.0,
             "advice": "",
-            "reps": client.reps_counts.copy(),
+            "reps": client.reps_counts.copy(),  # ✅ ส่งทุก pose
             "holds": hold_info,
-            "state": state,  # เพิ่มสถานะปัจจุบันให้ Flutter ดู
-            "last_conf": round(last_conf, 2)  # เพิ่ม confidence ล่าสุดเพื่อ debug
+            "state": state,
+            "last_conf": round(last_conf, 2)
         }
